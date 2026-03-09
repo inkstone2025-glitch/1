@@ -1,47 +1,26 @@
 # data.py
 
 from __future__ import annotations
+from pathlib import Path
 from typing import Any, Dict, List, Tuple, TypedDict
 
 import numpy as np
 import pandas as pd
 
 # ===================================================================
-# Country-level reference data (enrollment rates + max available sites)
+# Country-level reference data — loaded from data/country_data.csv
+# Columns: country_name, enroll_mean, enroll_var, max_sites
 # ===================================================================
-COUNTRY_DATA = {
-    'country_name': ["Argentina", "Austria", "Australia", "Belgium", "Bulgaria", "Chile", "China",
-                     "Czech Republic", "Estonia", "Spain", "Finland", "United Kingdom", "Greece",
-                     "Hong Kong", "Croatia", "Hungary", "India", "Italy", "South Korea", "Mexico",
-                     "Malaysia", "Netherlands", "New Zealand", "Peru", "Philippines", "Pakistan",
-                     "Poland", "Portugal", "Russia", "Sweden", "Slovenia", "Slovakia", "United States",
-                     "South Africa"],
-    'enroll_mean': [0.119772907292732, 0.192334329301287, 0.0618951894087672, 0.0286274875512264,
-                    0.119838446575526, 0.0806564602327388, 0.0791928399316703, 0.0473969393018412,
-                    0.222907907834042, 0.140656438344257, 0.228451851974456, 0.240697308137417,
-                    0.0446349424012019, 0.0341052241463141, 0.0287313432835821, 0.223994825296515,
-                    0.815384615384615, 0.0864162712152835, 0.119278535368533, 0.292446636045215,
-                    0.0253909884412825, 0.218052663079997, 0.348039215686274, 0.549295774647887,
-                    0.031464518705898, 0.286351674641148, 0.156966230122541, 0.0371447028423773,
-                    0.105837056590878, 0.0583303664614245, 0.0355189241427243, 0.128137225097023,
-                    0.261467907927595, 0.0867855922595078],
-    'enroll_var': [0.0567082762702618, 0.111002141963495, 0.0313009416199871, 6.57009731286169e-05,
-                   0.0352066820442973, 0.0147741339401526, 0.000860370177161715, 0.00311255898353705,
-                   0.148589410569972, 0.251672584664282, 0.186371171190654, 0.174378365461528,
-                   0.000367013470584561, 0.000171997099524204, 0.00230693547189426, 0.084195557331705,
-                   0.170414201183432, 0.0329968169373322, 0.0656415681621831, 0.332556808949861,
-                   0.000360250892786568, 0.150428177274775, 0.203046905036524, 0.406268597500496,
-                   0.00022036023023808, 0.228234740314248, 0.0889324754210265, 0.000175478570331644,
-                   0.0106998573962253, 0.00836066031579909, 0.000209162555319519, 0.0838120196358846,
-                   0.223706111169478, 0.046715154428215],
-    # Max available sites per country (placeholder values — replace with real data)
-    'max_sites': [12, 8, 10, 6, 7, 9, 15, 5, 6, 11, 7, 14, 5, 4, 4, 8, 20, 10, 9, 12,
-                  5, 8, 6, 8, 6, 10, 11, 5, 13, 6, 4, 7, 18, 8],
-}
+_CSV_PATH = Path(__file__).resolve().parents[2] / "data" / "country_data.csv"
+
+_country_df = pd.read_csv(_CSV_PATH)
+_country_df["max_sites"] = _country_df["max_sites"].astype(int)
+
+COUNTRY_DATA: dict = _country_df.to_dict(orient="list")
 
 # Pre-built lookup: country_name -> max_sites
 MAX_SITES_BY_COUNTRY: dict[str, int] = dict(
-    zip(COUNTRY_DATA['country_name'], COUNTRY_DATA['max_sites'])
+    zip(_country_df["country_name"], _country_df["max_sites"])
 )
 
 
@@ -63,7 +42,7 @@ def prepare_simulation_data(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     country_df = pd.DataFrame(COUNTRY_DATA)
 
-    full_list_of_countries = data['country_name']
+    full_list_of_countries = COUNTRY_DATA['country_name']
     n_countries = len(full_list_of_countries)
     max_sites_per_country = 20
 
