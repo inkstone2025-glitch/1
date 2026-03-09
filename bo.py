@@ -25,7 +25,7 @@ from gpytorch.constraints import GreaterThan
 
 from .api import extract_power_at, call_endpoint, payload_cost, parse_cost
 from .pipeline import build_graph
-from .config import SURV_BASE, COST_BASE, COST_EP, SELECTED_COUNTRIES
+from .config import SURV_BASE, COST_BASE, COST_EP, MUST_INCLUDE_COUNTRIES, OPTIONAL_COUNTRIES
 from .data import get_max_sites
 
 
@@ -116,26 +116,39 @@ def run_bo(
     finals_all = []
     bo_records = []
 
-    # Fixed country list from config + max sites from data
-    country_list = list(SELECTED_COUNTRIES)
-    country_max_sites = get_max_sites(country_list)
-    n_countries = len(country_list)
+    # Two-tier country setup
+    must_list     = list(MUST_INCLUDE_COUNTRIES)
+    optional_list = list(OPTIONAL_COUNTRIES)
+    all_countries = must_list + optional_list
+    country_max_sites = get_max_sites(all_countries)
+    n_must     = len(must_list)
+    n_optional = len(optional_list)
 
     # Build app & get baseline N from survival (for target_N bounds)
-    app = build_graph()
     baseline_output = app.invoke({
         "survival_params": SURV_BASE,
-        "recruit_sites_per_country": {country_list[0]: 1},
+        "recruit_sites_per_country": {must_list[0]: 1},
         "target_N": 1000,
     })
     baseline_N90 = baseline_output["summary"]["N_total_90pos"]
 
-    # Decision variable ranges: per-country sites [1, max_sites_i] + target_N
+    # Decision variable ranges:
+    #   must-include: [1, max_sites_i]  (always present)
+    #   optional:     [0, max_sites_i]  (0 = exclude, ≥1 = include)
+    #   target_N:     [N_min, N_max]
     N_TARGET_MIN = max(50, int(0.5 * baseline_N90))
     N_TARGET_MAX = int(1.5 * baseline_N90)
 
-    lower_bounds = [1.0] * n_countries + [float(N_TARGET_MIN)]
-    upper_bounds = [float(country_max_sites[c]) for c in country_list] + [float(N_TARGET_MAX)]
+    lower_bounds = (
+        [1.0] * n_must
+        + [0.0] * n_optional
+        + [float(N_TARGET_MIN)]
+    )
+    upper_bounds = (
+        [float(country_max_sites[c]) for c in must_list]
+        + [float(country_max_sites[c]) for c in optional_list]
+        + [float(N_TARGET_MAX)]
+    )
 
     BO_BOUNDS = torch.tensor(
         [lower_bounds, upper_bounds],
@@ -143,22 +156,32 @@ def run_bo(
     )
 
     def x_to_decisions(*, x_row: torch.Tensor) -> dict:
-        # Decode per-country site allocations
         sites_per_country = {}
-        for i, country in enumerate(country_list):
-            n_sites = int(round(float(x_row[..., i].item())))
-            n_sites = max(1, min(country_max_sites[country], n_sites))
-            sites_per_country[country] = n_sites
+
+        # Must-include countries: clamp to [1, max_sites]
+        for i, country in enumerate(must_list):
+            n = int(round(float(x_row[..., i].item())))
+            sites_per_country[country] = max(1, min(country_max_sites[country], n))
+
+        # Optional countries: 0 = exclude, ≥1 = include
+        optional_selected = []
+        for j, country in enumerate(optional_list):
+            n = int(round(float(x_row[..., n_must + j].item())))
+            n = max(0, min(country_max_sites[country], n))
+            if n >= 1:
+                sites_per_country[country] = n
+                optional_selected.append(country)
 
         # Last dimension is target_N
-        target_N = int(round(float(x_row[..., n_countries].item())))
+        target_N = int(round(float(x_row[..., n_must + n_optional].item())))
         target_N = max(N_TARGET_MIN, min(N_TARGET_MAX, target_N))
 
         total_sites = sum(sites_per_country.values())
 
         return {
             "sites_per_country": sites_per_country,
-            "countries": country_list,
+            "countries": list(sites_per_country.keys()),
+            "optional_countries_selected": optional_selected,
             "target_N": target_N,
             "total_sites": total_sites,
         }
@@ -249,8 +272,10 @@ def run_bo(
         xs = []
         for _ in range(n_pts):
             row = []
-            for country in country_list:
+            for country in must_list:
                 row.append(random.uniform(1.0, float(country_max_sites[country])))
+            for country in optional_list:
+                row.append(random.uniform(0.0, float(country_max_sites[country])))
             row.append(random.uniform(float(N_TARGET_MIN), float(N_TARGET_MAX)))
             xs.append(row)
         return torch.tensor(xs, **tkwargs)
@@ -292,6 +317,7 @@ def run_bo(
                 # decisions
                 "sites_per_country": dict(decisions["sites_per_country"]),
                 "countries": list(decisions["countries"]),
+                "optional_countries_selected": list(decisions["optional_countries_selected"]),
                 "num_countries": len(decisions["countries"]),
                 "n_sites_total": int(decisions["total_sites"]),
                 "target_N": int(decisions["target_N"]),
@@ -368,7 +394,14 @@ def run_bo(
     model = fit_mo_model(train_X, train_Y, bounds=BO_BOUNDS)
     warnings.filterwarnings("default", category=InputDataWarning)
 
-    ref_point = torch.tensor([-2000.0, -200.0, 0.5], **tkwargs)
+    # Adaptive reference point: worst observed value minus 10% of each objective's range.
+    # This guarantees every observed point dominates the reference point.
+    y_min = train_Y.min(dim=0).values
+    y_range = train_Y.max(dim=0).values - y_min
+    y_range = torch.clamp(y_range, min=1e-6)  # avoid zero range
+    ref_point = y_min - 0.1 * y_range
+
+    bo_log_df = pd.DataFrame(bo_records)
 
     # --- Resume logic for BO loop
     n_bo_evals = sum(1 for record in bo_records if record["phase"] == "bo")
@@ -379,7 +412,7 @@ def run_bo(
     print(f"Total BO iterations planned: {N_ITERS}")
     print(f"BO iterations completed: {n_batches_done}")
     print(f"BO iterations remaining: {n_remining_batches}")
-    print(f"Decision space: {n_countries} countries + target_N = {n_countries + 1}D")
+    print(f"Decision space: {n_must} must-include + {n_optional} optional + target_N = {n_must + n_optional + 1}D")
 
     if n_remining_batches <= 0:
         print("No BO iterations left to run. Exiting.")

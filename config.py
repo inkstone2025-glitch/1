@@ -65,10 +65,12 @@ SURV_BASE = {
 }
 
 
-# 2. User-defined country list for this trial
+# 2. User-defined country lists for this trial
 # Names must match the country data in data.py
 # Max available sites per country are defined in data.py (COUNTRY_DATA)
-SELECTED_COUNTRIES: list[str] = [
+
+# Always included — BO only optimizes site count [1, max_sites]
+MUST_INCLUDE_COUNTRIES: list[str] = [
     "United States",
     "India",
     "United Kingdom",
@@ -79,12 +81,21 @@ SELECTED_COUNTRIES: list[str] = [
     "Estonia",
 ]
 
+# Optional pool — BO decides both whether to include and how many sites [0, max_sites]
+# (0 = exclude, ≥1 = include with that many sites)
+OPTIONAL_COUNTRIES: list[str] = [
+    "Spain",
+    "Poland",
+    "South Korea",
+    "Argentina",
+]
+
 
 # 3. BO setting
 @dataclass
 class BOConfig:
     seed: int = 123             # Random seed for the entire BO run.
-    N_INIT: int = 25            # Number of inital random design evaluated before BO starts. Increased for higher-dim space. 15-30
+    N_INIT: int = 40            # Number of inital random design evaluated before BO starts. ~3x dimensionality (8 must + 4 optional + 1 = 13D → 40)
     N_ITERS: int = 100          # Number of BO iterations after initial design. Each one evaluates Q_BATCH new designs.
     Q_BATCH: int = 2            # Number of candidates designs evaluated per BO interation. =1: sequential BO (sample and stable); >1 : parallel BO (fast wall-clock, complex)
     RAW_SAMP: int = 512         # Number of random samples used to seed acuisition optimization. Larger = better global exploration but more computation. 128-1024
