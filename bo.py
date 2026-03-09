@@ -115,6 +115,7 @@ def run_bo(
     decisions_all=[]
     finals_all = []
     bo_records = []
+    ref_point = None  # set after initial design or restored from log on resume
 
     # Two-tier country setup
     must_list     = list(MUST_INCLUDE_COUNTRIES)
@@ -332,6 +333,8 @@ def run_bo(
                 "recruit_proj_payload": _df_to_payload(final["recruit_proj_df"]),
                 "surv_payload": _df_to_payload(final["surv_df"]),
                 "power_payload": _df_to_payload(final["power_df"]),
+                # ref_point persisted so resume restores the same hypervolume baseline
+                "ref_point": ref_point.tolist() if ref_point is not None else None,
             }
         )
 
@@ -364,6 +367,14 @@ def run_bo(
                     model = fit_mo_model(train_X, train_Y, bounds=BO_BOUNDS)
                     warnings.filterwarnings("default", category=InputDataWarning)
 
+                    # Restore saved ref_point so hypervolume is comparable across runs
+                    if "ref_point" in old_df.columns:
+                        _saved_rp = old_df["ref_point"].iloc[0]
+                        ref_point = torch.tensor(_saved_rp, **tkwargs)
+                        print(f"Restored ref_point from log: {ref_point.tolist()}")
+                    else:
+                        ref_point = None  # will be computed below (old log, no saved ref_point)
+
                     start_fresh = False
             else:
                 print(f"File {resume_from_file} is missing required columns. Starting fresh.")
@@ -394,12 +405,19 @@ def run_bo(
     model = fit_mo_model(train_X, train_Y, bounds=BO_BOUNDS)
     warnings.filterwarnings("default", category=InputDataWarning)
 
-    # Adaptive reference point: worst observed value minus 10% of each objective's range.
-    # This guarantees every observed point dominates the reference point.
-    y_min = train_Y.min(dim=0).values
-    y_range = train_Y.max(dim=0).values - y_min
-    y_range = torch.clamp(y_range, min=1e-6)  # avoid zero range
-    ref_point = y_min - 0.1 * y_range
+    # Ref point: restored from log on resume (set above), or computed fresh from initial design.
+    # Keeping it fixed for the entire run ensures hypervolume is comparable across resumed runs.
+    if ref_point is None:
+        y_init = train_Y  # on fresh start this is exactly the N_INIT points
+        y_min = y_init.min(dim=0).values
+        y_range = y_init.max(dim=0).values - y_min
+        y_range = torch.clamp(y_range, min=1e-6)
+        ref_point = y_min - 0.1 * y_range
+
+    # Backfill ref_point into all existing records so it's always persisted in the log
+    ref_point_list = ref_point.tolist()
+    for rec in bo_records:
+        rec.setdefault("ref_point", ref_point_list)
 
     bo_log_df = pd.DataFrame(bo_records)
 
